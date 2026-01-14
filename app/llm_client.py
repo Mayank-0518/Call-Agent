@@ -5,15 +5,19 @@ from dotenv import load_dotenv
 load_dotenv()
 
 API_KEY = os.getenv("OPENAI_API_KEY")
-BASE_URL = os.getenv("OPENAI_BASE_URL")
-MODEL = os.getenv("LLM_MODEL")
-if not API_KEY:
-    raise RuntimeError("OPENAI_API_KEY is not set")
+BASE_URL = os.getenv("OPENAI_BASE_URL") or "https://integrate.api.nvidia.com/v1"
+MODEL = os.getenv("LLM_MODEL") or "openai/gpt-oss-120b"
 
-client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
+if not API_KEY:
+    print("WARNING: OPENAI_API_KEY is not set. LLM calls will fail.")
+    client = None
+else:
+    client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
 
 
 async def generate_chat(messages, tools=None, temperature=0.2, max_tokens=400):
+    if not client:
+        raise RuntimeError("OPENAI_API_KEY is not configured")
     try:
         res = await client.chat.completions.create(
             model=MODEL,

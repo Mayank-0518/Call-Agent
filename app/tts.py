@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 async def speak(text: str) -> bytes:
-    model = os.getenv("VOICE_MODEL", "aura-2-odysseus-en")
+    model = os.getenv("VOICE_MODEL")
     url = (
         f"https://api.deepgram.com/v1/speak?model={model}"
         "&encoding=mulaw&sample_rate=8000&container=none"

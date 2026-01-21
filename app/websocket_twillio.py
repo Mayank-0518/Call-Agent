@@ -4,7 +4,6 @@ from starlette.websockets import WebSocketDisconnect, WebSocketState
 from app.agent import HotelAgent
 from app.stt import connect_stt
 from app.tts import TTSConnection, speak_stream
-from app.interruption_manager import InterruptionManager
 
 router = APIRouter()
 ECHO_BACK = os.getenv("ECHO_BACK", "false").lower() == "true"
@@ -18,7 +17,6 @@ async def twilio_ws(ws: WebSocket):
     agent = HotelAgent()
     stream_sid: str | None = None
     bg_tasks: set[asyncio.Task] = set()
-    interruption_mgr = InterruptionManager()
 
     greeted = False
     call_ended = False
@@ -30,57 +28,26 @@ async def twilio_ws(ws: WebSocket):
         await ws.close()
         return
     
-    async def on_speech_started():
-        if interruption_mgr.is_agent_speaking:
-            print("[twilio]  User interrupted agent!")
-            interruption_mgr.interrupt()
-            
-            # Clear TTS buffer
-            await tts_conn.handle_interruption()
-            
-            # Clear Twilio playback
-            if stream_sid:
-                try:
-                    await ws.send_text(json.dumps({
-                        "event": "clear",
-                        "streamSid": stream_sid
-                    }))
-                    print("[twilio] Sent clear to Twilio")
-                except Exception as e:
-                    print(f"[twilio] Failed to send clear: {e}")
-    
     async def on_final(text: str):
         nonlocal call_ended
         if call_ended:
             return
-        
-        # Start new response sequence
-        sequence_id = interruption_mgr.start_response()
             
-        print(f"[twilio] transcript: {text} (sequence_id={sequence_id})")
+        print(f"[twilio] transcript: {text}")
         try:
-            async for llm_chunk in agent.handle_stream(text, sequence_id=sequence_id, is_valid_fn=interruption_mgr.is_valid):
-                if not interruption_mgr.is_valid(sequence_id):
-                    print(f"[twilio] Sequence {sequence_id} stopped by interruption")
-                    break
-                    
+            async for llm_chunk in agent.handle_stream(text):
                 if call_ended:
                     break
                 
                 print(f"[twilio] LLM chunk: {llm_chunk}")
                 
                 async for audio_chunk in speak_stream(tts_conn, llm_chunk):
-                    # Check interruption before sending audio
-                    if not interruption_mgr.is_valid(sequence_id):
-                        print(f"[twilio] Audio interrupted for sequence {sequence_id}")
-                        break
-                        
                     if call_ended:
                         break
                     await stream_audio_to_twilio(audio_chunk)
                 
                 # Flush any remaining buffered audio after each LLM chunk
-                if audio_buffer and stream_sid and interruption_mgr.is_valid(sequence_id):
+                if audio_buffer and stream_sid:
                     payload = base64.b64encode(bytes(audio_buffer)).decode()
                     try:
                         await ws.send_text(json.dumps({
@@ -106,16 +73,13 @@ async def twilio_ws(ws: WebSocket):
                     if ws.client_state == WebSocketState.CONNECTED:
                         await ws.close()
                     break
-            
-            # Mark response as complete
-            interruption_mgr.finish_response(sequence_id)
                     
         except Exception as e:
             print(f"[twilio] error in on_final: {e}")
             import traceback
             traceback.print_exc()
 
-    send_q, close_stt = await connect_stt(on_final, on_speech_started)
+    send_q, close_stt = await connect_stt(on_final)
     print("[twilio] connected to Deepgram STT")
 
     audio_buffer = bytearray()

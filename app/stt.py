@@ -23,7 +23,7 @@ DG_URL = (
 HEADERS = {"Authorization": f"Token {os.getenv('DEEPGRAM_API_KEY')}"}
 
 
-async def connect_stt(on_final, on_speech_started=None):
+async def connect_stt(on_final):
     """Open a Deepgram streaming connection and return feed + closer."""
     ws = await websockets.connect(DG_URL, extra_headers=HEADERS, ping_interval=None)
     print("[stt] connected to Deepgram")
@@ -59,9 +59,8 @@ async def connect_stt(on_final, on_speech_started=None):
                 if not msg:
                     continue
                 data = json.loads(msg)
-                if data.get("type") == "SpeechStarted":
-                    if on_speech_started:
-                        await on_speech_started()
+                if data.get("type")=="SpeechStarted":
+                    await on_speech_started()
                 if data.get("is_final"):
                     text = data["channel"]["alternatives"][0].get("transcript", "")
                     if text:

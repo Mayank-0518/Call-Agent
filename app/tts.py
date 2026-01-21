@@ -83,14 +83,6 @@ class TTSConnection:
                 print(f"[tts] Error closing WebSocket: {e}")
             
             self.ws = None
-    
-    async def handle_interruption(self):
-        if self.ws and self.ws.state is websockets.protocol.State.OPEN:
-            try:
-                await self.ws.send(json.dumps({"type": "Clear"}))
-                print("[tts] Sent Clear message - discarding buffered audio")
-            except Exception as e:
-                print(f"[tts] Error sending Clear: {e}")
 
 
 async def speak_stream(tts_conn: TTSConnection, text: str):

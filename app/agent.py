@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from app.llm_client import generate_chat
+from app.llm_client import  generate_chat_stream,generate_chat
 from app.tools.reservation_tools import (update_context_from_text,compute_availability,select_room,finalize_booking)
 
 FLOW = json.loads(Path("app/flow.json").read_text())
@@ -136,16 +136,86 @@ class HotelAgent:
         self.tools = tool_spec()
         self.tool_runtime = ToolRuntime(self.context)
 
-    async def handle(self, user_text: str) -> str:
-        update_context_from_text(user_text, self.context)
+    # async def handle(self, user_text: str) -> str:
+    #     update_context_from_text(user_text, self.context)
 
+    #     self.messages.append({"role": "user", "content": user_text})
+
+    #     while True:
+    #         res = await generate_chat(self.messages, tools=self.tools)
+    #         msg = res.choices[0].message
+
+    #         tool_calls = getattr(msg, "tool_calls", None)
+    #         if tool_calls:
+    #             def _tool_call_dict(tc):
+    #                 return {
+    #                     "id": tc.id,
+    #                     "type": tc.type,
+    #                     "function": {
+    #                         "name": tc.function.name,
+    #                         "arguments": tc.function.arguments,
+    #                     },
+    #                 }
+
+    #             self.messages.append(
+    #                 {
+    #                     "role": "assistant",
+    #                     "content": msg.content or "",
+    #                     "tool_calls": [_tool_call_dict(tc) for tc in tool_calls],
+    #                 }
+    #             )
+
+    #             for tc in tool_calls:
+    #                 name = tc.function.name
+    #                 args = json.loads(tc.function.arguments or "{}")
+    #                 func = getattr(self.tool_runtime, name, None)
+    #                 if not func:
+    #                     result = {"error": f"Unknown tool {name}"}
+    #                 else:
+    #                     try:
+    #                         result = func(**args)
+    #                     except Exception as e:
+    #                         result = {"error": str(e)}
+
+    #                 self.messages.append(
+    #                     {
+    #                         "role": "tool",
+    #                         "tool_call_id": tc.id,
+    #                         "name": name,
+    #                         "content": json.dumps(result),
+    #                     }
+    #                 )
+    #                 if isinstance(result, dict) and result.get("booking_id"):
+    #                     self.booking_confirmed = True
+    #             continue
+
+    #         reply = msg.content or ""
+    #         self.messages.append({"role": "assistant", "content": reply})
+            
+    #         if self.context.get("booking_id") and not self.booking_confirmed:
+    #             self.booking_confirmed = True
+            
+    #         lower_reply = reply.lower()
+    #         if self.booking_confirmed and ("anything else" in lower_reply or "help you with" in lower_reply):
+    #             self.asked_anything_else = True
+            
+    #         lower_text = user_text.lower()
+    #         decline_keywords = ["no", "nope", "nah", "nothing", "that's all", "that is all", "no thanks", "i'm good", "im good", "all set", "that'll be all"]
+    #         if self.asked_anything_else and any(kw in lower_text for kw in decline_keywords):
+    #             self.completed = True
+    #             print("[agent] User declined further help; marking conversation complete")
+            
+    #         return reply
+
+    async def handle_stream(self, user_text: str, sequence_id: int = 0, is_valid_fn=None):
+        update_context_from_text(user_text, self.context)
         self.messages.append({"role": "user", "content": user_text})
 
         while True:
-            res = await generate_chat(self.messages, tools=self.tools)
+            res = await generate_chat(self.messages, tools=self.tools, max_tokens=50)
             msg = res.choices[0].message
-
             tool_calls = getattr(msg, "tool_calls", None)
+            
             if tool_calls:
                 def _tool_call_dict(tc):
                     return {
@@ -187,15 +257,43 @@ class HotelAgent:
                     )
                     if isinstance(result, dict) and result.get("booking_id"):
                         self.booking_confirmed = True
-                continue
+                continue 
 
-            reply = msg.content or ""
-            self.messages.append({"role": "assistant", "content": reply})
+            buffer = ""
+            full_response = ""
+            
+            async for chunk in generate_chat_stream(self.messages, tools=None):
+                if is_valid_fn and not is_valid_fn(sequence_id):
+                    print(f"[agent] Sequence {sequence_id} interrupted - stopping LLM stream")
+                    break
+                
+                delta = chunk.choices[0].delta
+                content = getattr(delta, "content", None)
+                
+                if content:
+                    buffer += content
+                    full_response += content
+                    
+                    if buffer.endswith((".", "?", "!", "\n")) and len(buffer.strip()) > 5:
+                        if is_valid_fn and not is_valid_fn(sequence_id):
+                            print(f"[agent] Sequence {sequence_id} interrupted before yield")
+                            break
+                        yield buffer.strip()
+                        buffer = ""
+            
+            if is_valid_fn and not is_valid_fn(sequence_id):
+                print(f"[agent] Sequence {sequence_id} interrupted - discarding final buffer")
+                break
+            
+            if buffer.strip():
+                yield buffer.strip()
+            
+            self.messages.append({"role": "assistant", "content": full_response})
             
             if self.context.get("booking_id") and not self.booking_confirmed:
                 self.booking_confirmed = True
             
-            lower_reply = reply.lower()
+            lower_reply = full_response.lower()
             if self.booking_confirmed and ("anything else" in lower_reply or "help you with" in lower_reply):
                 self.asked_anything_else = True
             
@@ -205,4 +303,4 @@ class HotelAgent:
                 self.completed = True
                 print("[agent] User declined further help; marking conversation complete")
             
-            return reply
+            break  

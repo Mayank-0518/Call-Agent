@@ -3,7 +3,8 @@ from fastapi import APIRouter, WebSocket
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 from app.agent import HotelAgent
 from app.stt import connect_stt
-from app.tts import speak
+from app.tts import TTSConnection, speak_stream
+from app.interruption_manager import InterruptionManager
 
 router = APIRouter()
 ECHO_BACK = os.getenv("ECHO_BACK", "false").lower() == "true"
@@ -17,73 +18,140 @@ async def twilio_ws(ws: WebSocket):
     agent = HotelAgent()
     stream_sid: str | None = None
     bg_tasks: set[asyncio.Task] = set()
+    interruption_mgr = InterruptionManager()
 
     greeted = False
     call_ended = False
+    
+    tts_conn = TTSConnection()
+    tts_ready = await tts_conn.start()
+    if not tts_ready:
+        print("[twilio] Failed to establish TTS connection")
+        await ws.close()
+        return
+    
+    async def on_speech_started():
+        if interruption_mgr.is_agent_speaking:
+            print("[twilio]  User interrupted agent!")
+            interruption_mgr.interrupt()
+            
+            # Clear TTS buffer
+            await tts_conn.handle_interruption()
+            
+            # Clear Twilio playback
+            if stream_sid:
+                try:
+                    await ws.send_text(json.dumps({
+                        "event": "clear",
+                        "streamSid": stream_sid
+                    }))
+                    print("[twilio] Sent clear to Twilio")
+                except Exception as e:
+                    print(f"[twilio] Failed to send clear: {e}")
     
     async def on_final(text: str):
         nonlocal call_ended
         if call_ended:
             return
+        
+        # Start new response sequence
+        sequence_id = interruption_mgr.start_response()
             
-        print(f"[twilio] transcript: {text}")
+        print(f"[twilio] transcript: {text} (sequence_id={sequence_id})")
         try:
-            reply = await agent.handle(text)
-            safe_reply = reply or "I didn't catch that. Could you please repeat?"
-            print(f"[twilio] llm reply: {safe_reply}")
-            audio = await speak(safe_reply)
+            async for llm_chunk in agent.handle_stream(text, sequence_id=sequence_id, is_valid_fn=interruption_mgr.is_valid):
+                if not interruption_mgr.is_valid(sequence_id):
+                    print(f"[twilio] Sequence {sequence_id} stopped by interruption")
+                    break
+                    
+                if call_ended:
+                    break
+                
+                print(f"[twilio] LLM chunk: {llm_chunk}")
+                
+                async for audio_chunk in speak_stream(tts_conn, llm_chunk):
+                    # Check interruption before sending audio
+                    if not interruption_mgr.is_valid(sequence_id):
+                        print(f"[twilio] Audio interrupted for sequence {sequence_id}")
+                        break
+                        
+                    if call_ended:
+                        break
+                    await stream_audio_to_twilio(audio_chunk)
+                
+                # Flush any remaining buffered audio after each LLM chunk
+                if audio_buffer and stream_sid and interruption_mgr.is_valid(sequence_id):
+                    payload = base64.b64encode(bytes(audio_buffer)).decode()
+                    try:
+                        await ws.send_text(json.dumps({
+                            "event": "media",
+                            "streamSid": stream_sid,
+                            "media": {"payload": payload}
+                        }))
+                    except Exception:
+                        pass
+                    audio_buffer.clear()
+                
+                if agent.completed:
+                    call_ended = True
+                    print("[twilio] conversation complete; closing call")
+                    await asyncio.sleep(0.5)
+                    
+                    try:
+                        await ws.send_text(json.dumps({"event": "stop", "streamSid": stream_sid}))
+                    except Exception as e:
+                        print(f"[twilio] stop event failed: {e}")
+                    
+                    await close_stt()
+                    if ws.client_state == WebSocketState.CONNECTED:
+                        await ws.close()
+                    break
             
-            if agent.completed:
-                call_ended = True
-                await stream_audio_to_twilio(audio)
-                print("[twilio] goodbye message sent; waiting for audio to complete")
-                await asyncio.sleep(len(audio) / 8000 + 2)
-                print("[twilio] sending stop event to end call")
-                
-                try:
-                    await ws.send_text(json.dumps({"event": "stop", "streamSid": stream_sid}))
-                except Exception as e:
-                    print(f"[twilio] stop event failed: {e}")
-                
-                await close_stt()
-                if ws.client_state == WebSocketState.CONNECTED:
-                    await ws.close()
-                return
-
-            bg_tasks.add(asyncio.create_task(stream_audio_to_twilio(audio)))
+            # Mark response as complete
+            interruption_mgr.finish_response(sequence_id)
+                    
         except Exception as e:
             print(f"[twilio] error in on_final: {e}")
+            import traceback
+            traceback.print_exc()
 
-    send_q, close_stt = await connect_stt(on_final)
+    send_q, close_stt = await connect_stt(on_final, on_speech_started)
     print("[twilio] connected to Deepgram STT")
 
+    audio_buffer = bytearray()
+    
+    def buffer_and_yield_frames(audio: bytes):
+        """Buffer audio and yield aligned 160-byte frames for Twilio."""
+        nonlocal audio_buffer
+        audio_buffer.extend(audio)
+        
+        frames = []
+        while len(audio_buffer) >= 160:
+            frames.append(bytes(audio_buffer[:160]))
+            audio_buffer = audio_buffer[160:]
+        
+        return frames
+    
     async def stream_audio_to_twilio(audio: bytes):
         nonlocal stream_sid
         if not stream_sid:
-            print("[twilio] stream_audio_to_twilio called before streamSid; skipping")
             return
-        payload = base64.b64encode(audio).decode()
-        try:
-            await ws.send_text(
-                json.dumps(
-                    {
-                        "event": "media",
-                        "streamSid": stream_sid,
-                        "media": {"payload": payload},
-                    }
+        
+        for frame in buffer_and_yield_frames(audio):
+            payload = base64.b64encode(frame).decode()
+            try:
+                await ws.send_text(
+                    json.dumps(
+                        {
+                            "event": "media",
+                            "streamSid": stream_sid,
+                            "media": {"payload": payload},
+                        }
+                    )
                 )
-            )
-            await ws.send_text(
-                json.dumps(
-                    {
-                        "event": "mark",
-                        "streamSid": stream_sid,
-                        "mark": {"name": "audio-complete"},
-                    }
-                )
-            )
-        except Exception as e:
-            print(f"[twilio] send media failed: {e}")
+            except Exception as e:
+                print(f"[twilio] send media failed: {e}")
+                break
 
     try:
         while True:
@@ -107,14 +175,15 @@ async def twilio_ws(ws: WebSocket):
                 if not greeted:
                     greeted = True
                     greeting = (
-                        "Hi, I am Ashish, your hotel enquiry agent. "
+                        "Hi, I am Alisha, your hotel enquiry agent. "
                         "I can help with availability, rates, and reservations. "
                         "How may I assist you today?"
                     )
                     try:
-                        audio = await speak(greeting)
-                        print(f"[twilio] sent startup greeting bytes={len(audio)}")
-                        bg_tasks.add(asyncio.create_task(stream_audio_to_twilio(audio)))
+                        # Use streaming TTS for greeting with persistent connection
+                        async for audio_chunk in speak_stream(tts_conn, greeting):
+                            await stream_audio_to_twilio(audio_chunk)
+                        print(f"[twilio] sent startup greeting (streamed)")
                     except Exception as e:
                         print(f"[twilio] greeting TTS failed: {e}")
             elif evt == "media":
@@ -135,8 +204,9 @@ async def twilio_ws(ws: WebSocket):
                 break
 
     finally:
-        print("[twilio] closing STT and websocket")
+        print("[twilio] closing STT, TTS and websocket")
         await close_stt()
+        await tts_conn.cleanup()
         for t in bg_tasks:
             t.cancel()
         await asyncio.gather(*bg_tasks, return_exceptions=True)

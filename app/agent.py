@@ -208,11 +208,12 @@ class HotelAgent:
     #         return reply
 
     async def handle_stream(self, user_text: str, sequence_id: int = 0, is_valid_fn=None):
+        """Stream LLM responses in chunks for low-latency output with interruption support"""
         update_context_from_text(user_text, self.context)
         self.messages.append({"role": "user", "content": user_text})
 
         while True:
-            res = await generate_chat(self.messages, tools=self.tools, max_tokens=50)
+            res = await generate_chat(self.messages, tools=self.tools, max_tokens=800)
             msg = res.choices[0].message
             tool_calls = getattr(msg, "tool_calls", None)
             
@@ -263,6 +264,7 @@ class HotelAgent:
             full_response = ""
             
             async for chunk in generate_chat_stream(self.messages, tools=None):
+                # Check if interrupted
                 if is_valid_fn and not is_valid_fn(sequence_id):
                     print(f"[agent] Sequence {sequence_id} interrupted - stopping LLM stream")
                     break
@@ -275,12 +277,14 @@ class HotelAgent:
                     full_response += content
                     
                     if buffer.endswith((".", "?", "!", "\n")) and len(buffer.strip()) > 5:
+                        # Check again before yielding
                         if is_valid_fn and not is_valid_fn(sequence_id):
                             print(f"[agent] Sequence {sequence_id} interrupted before yield")
                             break
                         yield buffer.strip()
                         buffer = ""
             
+            # Check if interrupted before final yield
             if is_valid_fn and not is_valid_fn(sequence_id):
                 print(f"[agent] Sequence {sequence_id} interrupted - discarding final buffer")
                 break

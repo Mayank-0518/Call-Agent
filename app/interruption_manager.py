@@ -1,3 +1,7 @@
+"""
+Interruption Manager - tracks valid response sequences and handles barge-in
+"""
+
 class InterruptionManager:
     def __init__(self):
         self.current_sequence_id = 0
@@ -15,7 +19,7 @@ class InterruptionManager:
     def interrupt(self):
         """User interrupted - invalidate all active sequences"""
         if self.active_sequences:
-            print(f"[interrupt] User interrupted!")
+            print(f"[interrupt] User interrupted! Invalidating {len(self.active_sequences)} sequences")
             self.active_sequences.clear()
             self.is_agent_speaking = False
         

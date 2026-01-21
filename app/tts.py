@@ -85,6 +85,7 @@ class TTSConnection:
             self.ws = None
     
     async def handle_interruption(self):
+        """Handle user interruption - clear TTS buffer"""
         if self.ws and self.ws.state is websockets.protocol.State.OPEN:
             try:
                 await self.ws.send(json.dumps({"type": "Clear"}))

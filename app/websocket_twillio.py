@@ -31,9 +31,15 @@ async def twilio_ws(ws: WebSocket):
         return
     
     async def on_speech_started():
+        """Called when user starts speaking - interrupt agent"""
+        nonlocal audio_buffer
         if interruption_mgr.is_agent_speaking:
-            print("[twilio]  User interrupted agent!")
+            print("[twilio] 🔴 User interrupted agent!")
             interruption_mgr.interrupt()
+            
+            # Clear audio buffer immediately to prevent sending buffered frames
+            audio_buffer.clear()
+            print("[twilio] Cleared audio buffer")
             
             # Clear TTS buffer
             await tts_conn.handle_interruption()
@@ -56,10 +62,18 @@ async def twilio_ws(ws: WebSocket):
         
         # Start new response sequence
         sequence_id = interruption_mgr.start_response()
+        
+        # Start new response sequence
+        sequence_id = interruption_mgr.start_response()
             
         print(f"[twilio] transcript: {text} (sequence_id={sequence_id})")
         try:
-            async for llm_chunk in agent.handle_stream(text, sequence_id=sequence_id, is_valid_fn=interruption_mgr.is_valid):
+            async for llm_chunk in agent.handle_stream(
+                text, 
+                sequence_id=sequence_id, 
+                is_valid_fn=interruption_mgr.is_valid
+            ):
+                # Check if interrupted
                 if not interruption_mgr.is_valid(sequence_id):
                     print(f"[twilio] Sequence {sequence_id} stopped by interruption")
                     break
@@ -77,7 +91,7 @@ async def twilio_ws(ws: WebSocket):
                         
                     if call_ended:
                         break
-                    await stream_audio_to_twilio(audio_chunk)
+                    await stream_audio_to_twilio(audio_chunk, sequence_id)
                 
                 # Flush any remaining buffered audio after each LLM chunk
                 if audio_buffer and stream_sid and interruption_mgr.is_valid(sequence_id):
@@ -132,12 +146,17 @@ async def twilio_ws(ws: WebSocket):
         
         return frames
     
-    async def stream_audio_to_twilio(audio: bytes):
+    async def stream_audio_to_twilio(audio: bytes, sequence_id: int):
         nonlocal stream_sid
         if not stream_sid:
             return
         
         for frame in buffer_and_yield_frames(audio):
+            # Check if sequence is still valid before sending each frame
+            if not interruption_mgr.is_valid(sequence_id):
+                print(f"[twilio] Stopping frame send - sequence {sequence_id} invalidated")
+                break
+                
             payload = base64.b64encode(frame).decode()
             try:
                 await ws.send_text(
@@ -181,8 +200,12 @@ async def twilio_ws(ws: WebSocket):
                     )
                     try:
                         # Use streaming TTS for greeting with persistent connection
+                        greeting_seq = interruption_mgr.start_response()
                         async for audio_chunk in speak_stream(tts_conn, greeting):
-                            await stream_audio_to_twilio(audio_chunk)
+                            if not interruption_mgr.is_valid(greeting_seq):
+                                break
+                            await stream_audio_to_twilio(audio_chunk, greeting_seq)
+                        interruption_mgr.finish_response(greeting_seq)
                         print(f"[twilio] sent startup greeting (streamed)")
                     except Exception as e:
                         print(f"[twilio] greeting TTS failed: {e}")

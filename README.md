@@ -1,10 +1,10 @@
-    # Real-Time Voice Agent for Hotel Bookings
+## Real-Time Voice Agent for Hotel Bookings
 
 A streaming voice agent built with FastAPI, Deepgram, Groq LLMs, and Twilio that handles hotel inquiries and reservations with sub-1-second response times and natural interruption handling.
 
 ## Architecture
 
-![System Architecture](images/architecture.png)
+![System Architecture](images/architecture_.png)
 
 
 ## Features

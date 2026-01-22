@@ -130,7 +130,7 @@ class HotelAgent:
             {"role": "system", "content": SYSTEM_PROMPT},
             {
                 "role": "system",
-                "content": "Use the provided tools to fetch availability, choose a room, and finalize bookings. Always keep responses concise, spoken style.",
+                "content": "Use the provided tools to fetch availability, choose a room, and finalize bookings. Always keep responses concise, spoken style. Convert all numbers to numeric example 'five'->5 'thirty'->30",
             },
         ]
         self.tools = tool_spec()
@@ -213,7 +213,7 @@ class HotelAgent:
         self.messages.append({"role": "user", "content": user_text})
 
         while True:
-            res = await generate_chat(self.messages, tools=self.tools, max_tokens=800)
+            res = await generate_chat(self.messages, tools=self.tools)
             msg = res.choices[0].message
             tool_calls = getattr(msg, "tool_calls", None)
             

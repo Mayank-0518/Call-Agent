@@ -15,7 +15,7 @@ else:
     client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
 
 
-async def generate_chat(messages, tools=None, temperature=0.2, max_tokens=400):
+async def generate_chat(messages, tools=None, temperature=0.2, max_tokens=700):
     """Non-streaming chat completion (for tool calls)"""
     if not client:
         raise RuntimeError("OPENAI_API_KEY is not configured")
@@ -43,7 +43,7 @@ async def generate_chat(messages, tools=None, temperature=0.2, max_tokens=400):
         raise
 
 
-async def generate_chat_stream(messages, tools=None, temperature=0.2, max_tokens=400):
+async def generate_chat_stream(messages, tools=None, temperature=0.2, max_tokens=700):
     """Stream LLM response chunks as they arrive"""
     if not client:
         raise RuntimeError("OPENAI_API_KEY is not configured")
